@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: 2026 iliyaj
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Defines an example systemd user service for running the nagame daemon.
+
+[Unit]
+Description=nagame - Dynamic Wayland Display and Wallpaper Manager
+Documentation=https://github.com/iliyaj/nagame
+After=graphical-session.target
+Wants=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/nagame --config %h/.config/nagame/config.toml
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Process management
+KillMode=mixed
+TimeoutStopSec=30
+
+# Security settings
+PrivateNetwork=false
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state
+NoNewPrivileges=true
+
+[Install]
+WantedBy=graphical-session.target

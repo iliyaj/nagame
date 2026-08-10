@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: 2026 iliyaj
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Checks formatting, linting, tests, documentation, packaging, and dependencies.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "23 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup component add clippy rustfmt
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --all-targets --all-features --locked
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items --locked
+      - run: cargo package --locked
+      - run: pipx run reuse lint
+      - run: ./scripts/build-release.sh
+      - run: '! strings target/release/nagame | grep -F "$HOME/"'
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit

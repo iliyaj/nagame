@@ -1,0 +1,88 @@
+# SPDX-FileCopyrightText: 2026 iliyaj
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Demonstrates how to configure nagame display profiles and wallpapers.
+# Place this file at ~/.config/nagame/config.toml
+
+# Single monitor profile (laptop only)
+[[profile]]
+name = "laptop"
+wallpaper = "~/Pictures/Wallpapers/laptop.jpg"
+exec = [
+  "hyprctl notify -1 2000 'rgb(00ff00)' 'Laptop mode activated'",
+  "echo 'Laptop profile applied'"
+]
+
+  [[profile.output]]
+  name = "eDP-1"
+  mode = "1920x1080@60"
+  scale = 1.5
+  position = [0, 0]
+
+# External monitor only (docked, laptop closed)
+[[profile]]
+name = "docked"
+wallpaper = "~/Pictures/Wallpapers/desktop.jpg"
+exec = ["hyprctl notify -1 2000 'rgb(0000ff)' 'Docked mode activated'"]
+
+  [[profile.output]]
+  name = "eDP-1"
+  enabled = false  # Disable laptop screen
+
+  [[profile.output]]
+  name = "HDMI-A-2"
+  mode = "2560x1440@144"
+  scale = 1.0
+  position = [0, 0]
+  adaptive_sync = true  # Enable FreeSync/G-Sync
+
+# Dual monitor setup (laptop + external)
+[[profile]]
+name = "dual-monitors"
+wallpaper = "~/Pictures/Wallpapers/ultrawide.jpg"
+
+  [[profile.output]]
+  name = "eDP-1"
+  mode = "1920x1080@60"
+  scale = 1.0
+  position = [0, 0]
+
+  [[profile.output]]
+  name = "HDMI-A-2"
+  mode = "2560x1440@144"
+  scale = 1.0
+  position = [1920, 0]  # Right of laptop screen
+
+# 4K monitor with scaling
+[[profile]]
+name = "4k-monitor"
+# Pick a random supported image from this directory on activation.
+# wallpaper_dir takes precedence if both wallpaper options are present.
+wallpaper_dir = "~/Pictures/Wallpapers/4k"
+
+  [[profile.output]]
+  name = "DP-1"
+  mode = "3840x2160@60"
+  scale = 1.5  # Scale for better readability
+  position = [0, 0]
+
+# Portrait monitor example
+[[profile]]
+name = "portrait"
+wallpaper = "~/Pictures/Wallpapers/portrait.jpg"
+
+  [[profile.output]]
+  name = "DP-1"
+  mode = "2560x1440@60"
+  scale = 1.0
+  position = [0, 0]
+  transform = "90"  # Rotate 90 degrees
+
+# Wildcard example (matches any output)
+[[profile]]
+name = "fallback"
+wallpaper = "~/Pictures/Wallpapers/default.jpg"
+
+  [[profile.output]]
+  name = "*"  # Wildcard matches any output
+  mode = "1920x1080@60"
+  scale = 1.0

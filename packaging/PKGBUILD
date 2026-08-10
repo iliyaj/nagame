@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: 2026 iliyaj
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Builds the Arch Linux package for the nagame daemon.
+# Maintainer: iliyaj <iliya.jokic@gmail.com>
+
+pkgname=nagame
+pkgver=0.0.1
+pkgrel=1
+pkgdesc="Dynamic Wayland display and wallpaper manager"
+arch=('x86_64')
+url="https://github.com/iliyaj/nagame"
+license=('GPL-3.0-or-later')
+depends=('gcc-libs' 'glibc')
+makedepends=('cargo')
+optdepends=('awww: wallpaper management support')
+options=('!debug' '!lto')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+# SHA-256 checksum of the tagged GitHub source archive.
+sha256sums=('9f1cf47036082640fec7e5d63d3632d0a9da3ddb672ecfd38c4f242dd8e4e914')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # Keep the build directory out of the shipped binary.
+  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$srcdir=/build"
+  cargo build --frozen --release --all-features
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo test --frozen --all-features
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+
+  install -Dm0755 target/release/nagame "$pkgdir/usr/bin/nagame"
+
+  # The example unit is packaged verbatim apart from the installed binary path.
+  sed 's|/usr/local/bin/nagame|/usr/bin/nagame|' nagame.service.example \
+    > "$srcdir/nagame.service"
+  install -Dm0644 "$srcdir/nagame.service" \
+    "$pkgdir/usr/lib/systemd/user/nagame.service"
+
+  install -Dm0644 config.toml.example \
+    "$pkgdir/usr/share/nagame/config.toml.example"
+  install -Dm0644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

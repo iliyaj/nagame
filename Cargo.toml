@@ -1,0 +1,84 @@
+# SPDX-FileCopyrightText: 2026 iliyaj
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Defines the nagame Rust package, dependencies, library, and executable.
+
+[package]
+name = "nagame"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.86"
+description = "Dynamic Wayland display and wallpaper manager - autorandr for Wayland with integrated awww wallpaper management"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/iliyaj/nagame"
+keywords = ["wayland", "display", "output", "wallpaper", "awww"]
+categories = ["gui", "multimedia::images"]
+include = [
+  "src/**",
+  "Cargo.toml",
+  "Cargo.lock",
+  "README.md",
+  "SECURITY.md",
+  "REUSE.toml",
+  "LICENSE",
+  "LICENSES/**",
+  "config.toml.example",
+  "nagame.service.example",
+  "scripts/**",
+]
+
+[dependencies]
+# Wayland protocol support
+wayland-client = "0.31.15"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+# Configuration and serialization
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+
+# CLI and argument parsing
+clap = { version = "4.4", features = ["derive"] }
+
+# Async runtime
+tokio = { version = "1.0", features = [
+  "fs",
+  "io-util",
+  "macros",
+  "net",
+  "process",
+  "rt-multi-thread",
+  "signal",
+  "sync",
+  "time",
+] }
+
+# Error handling
+anyhow = "1.0.104"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# File watching for config hot-reload
+notify = "6.1"
+
+# Path manipulation
+dirs = "5.0"
+
+# Random selection (for wallpaper_dir)
+rand = "0.8.6"
+
+[dev-dependencies]
+# Testing utilities
+tempfile = "3.8"
+
+[[bin]]
+name = "nagame"
+path = "src/main.rs"
+
+[lib]
+name = "nagame"
+path = "src/lib.rs"
+
+[profile.release]
+strip = "symbols"

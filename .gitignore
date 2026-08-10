@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: 2026 iliyaj
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Excludes build artifacts, local configuration, and editor files from Git.
+
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Production config (keep example only)
+config.toml
+!config.toml.example
+
+# Build artifacts
+*.o
+*.so
+*.dylib
+/packaging/*.pkg.tar.*
+/packaging/*.tar.gz
+
+# Test files
+test_output/
+
+# Logs
+*.log
+
+# System
+.env
+.env.local
+
+# Development and deprecated files
+/deprecated/
+deprecated-scripts
+config.toml.production
+
+# System service file (contains local paths)
+nagame.service
+
+# Agents
+CLAUDE.md
+AGENTS.md
+
+# Akira - AI Native Ticket Tracker
+/.akira
