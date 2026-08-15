@@ -9,7 +9,7 @@ pub mod protocols;
 
 pub use client::WaylandClient;
 pub use output::OutputManager;
-pub use protocols::{OutputHead, OutputMode, WaylandState};
+pub use protocols::{HeadConfiguration, OutputHead, OutputMode, WaylandState};
 
 use anyhow::Result;
 

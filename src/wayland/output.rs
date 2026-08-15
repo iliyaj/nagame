@@ -177,6 +177,129 @@ impl OutputManager {
         best_match
     }
 
+    /// Capture every property needed to restore the compositor's exact live state.
+    pub fn snapshot_configuration(&self) -> Result<Vec<(String, HeadConfiguration)>> {
+        self.get_heads()
+            .into_iter()
+            .map(|head| {
+                if head.enabled && head.current_mode.is_none() {
+                    return Err(anyhow!(
+                        "Enabled output '{}' has no current advertised mode",
+                        head.name
+                    ));
+                }
+                Ok((
+                    head.name.clone(),
+                    HeadConfiguration {
+                        enabled: head.enabled,
+                        mode: head.current_mode.clone(),
+                        position: head.position,
+                        transform: Some(head.transform),
+                        scale: Some(head.scale),
+                        adaptive_sync: head.adaptive_sync,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// Build a complete candidate by replacing one mode with an exact advertised mode ID.
+    pub fn candidate_with_mode(
+        &self,
+        output_name: &str,
+        mode_id: &str,
+    ) -> Result<Vec<(String, HeadConfiguration)>> {
+        let head = self
+            .get_head(output_name)
+            .ok_or_else(|| anyhow!("Output '{}' is not connected", output_name))?;
+        if !head.enabled {
+            return Err(anyhow!("Output '{}' is disabled", output_name));
+        }
+        let requested = head
+            .modes
+            .iter()
+            .find(|mode| crate::ipc::mode_id(mode) == mode_id)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!(
+                    "Mode '{}' is not advertised by output '{}'",
+                    mode_id,
+                    output_name
+                )
+            })?;
+        if head.current_mode.as_ref() == Some(&requested) {
+            return Err(anyhow!(
+                "Output '{}' is already using that mode",
+                output_name
+            ));
+        }
+
+        let mut candidate = self.snapshot_configuration()?;
+        let (_, config) = candidate
+            .iter_mut()
+            .find(|(name, _)| name == output_name)
+            .ok_or_else(|| anyhow!("Output '{}' disappeared", output_name))?;
+        config.mode = Some(requested);
+        Ok(candidate)
+    }
+
+    /// Ask the compositor to validate a complete configuration without applying it.
+    pub async fn test_configuration(
+        &mut self,
+        configuration: &[(String, HeadConfiguration)],
+    ) -> Result<()> {
+        self.submit_configuration(configuration, true).await
+    }
+
+    /// Apply a complete, already validated configuration.
+    pub async fn apply_configuration(
+        &mut self,
+        configuration: &[(String, HeadConfiguration)],
+    ) -> Result<()> {
+        self.submit_configuration(configuration, false).await
+    }
+
+    async fn submit_configuration(
+        &mut self,
+        configuration: &[(String, HeadConfiguration)],
+        test_only: bool,
+    ) -> Result<()> {
+        if !self.is_available() {
+            return Err(anyhow!("wlr-output-management is not available"));
+        }
+
+        let mut connected: Vec<_> = self
+            .get_heads()
+            .into_iter()
+            .map(|head| head.name.as_str())
+            .collect();
+        let mut supplied: Vec<_> = configuration
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        connected.sort_unstable();
+        supplied.sort_unstable();
+        if connected != supplied {
+            return Err(anyhow!(
+                "Connected outputs changed while preparing the display configuration"
+            ));
+        }
+
+        let client = self
+            .wayland_client
+            .as_mut()
+            .ok_or_else(|| anyhow!("Wayland client not initialized"))?;
+        client.create_configuration().await?;
+        for (name, config) in configuration {
+            client.configure_head(name, config).await?;
+        }
+        if test_only {
+            client.test_configuration().await
+        } else {
+            client.apply_configuration().await
+        }
+    }
+
     /// Apply a profile configuration
     pub async fn apply_profile(&mut self, profile: &Profile) -> Result<bool> {
         info!(

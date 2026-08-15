@@ -114,6 +114,30 @@ nagame --debug
 
 `--test-only` verifies the TOML configuration and checks that each configured `wallpaper` and `wallpaper_dir` exists. Update the paths copied from the example before running it.
 
+### Display-control commands
+
+The running daemon exposes a private JSON interface through its Unix socket. List connected outputs and the exact mode IDs advertised by the compositor with:
+
+```bash
+nagame display outputs
+```
+
+Copy an advertised mode ID from that response to start a safe preview:
+
+```bash
+nagame display preview --output DP-1 --mode 2560x1440@144000mHz
+```
+
+Nagame tests the complete candidate configuration before applying it. The preview lasts 15 seconds and always restores the previous live configuration; it never writes the TOML file. Keep the preview command running while presenting the countdown because disconnecting it also triggers an immediate revert.
+
+The first preview event includes a transaction ID. A second process can request an earlier revert:
+
+```bash
+nagame display revert --transaction TRANSACTION_ID
+```
+
+Only one display preview can be pending at a time. Mode IDs are exact millihertz-backed identifiers and must come from `display outputs`; arbitrary resolution and refresh combinations are rejected.
+
 ## Run as a systemd user service
 
 Create `~/.config/systemd/user/nagame.service`:
@@ -129,6 +153,7 @@ PartOf=graphical-session.target
 [Service]
 Type=exec
 ExecStart=/usr/local/bin/nagame --config %h/.config/nagame/config.toml
+RuntimeDirectory=nagame
 Restart=always
 RestartSec=5
 StandardOutput=journal

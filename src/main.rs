@@ -4,8 +4,9 @@
 //! Parses command-line options, initializes logging, and starts the nagame daemon.
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use nagame::config::Config;
+use nagame::ipc::{ClientRequest, ServerEvent};
 use nagame::NagameDaemon;
 use std::path::PathBuf;
 use tracing::{error, info};
@@ -14,6 +15,9 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Path to configuration file
     #[arg(short, long)]
     config: Option<PathBuf>,
@@ -27,6 +31,33 @@ struct Args {
     test_only: bool,
 }
 
+#[derive(Subcommand)]
+enum Command {
+    /// Query and temporarily preview display modes through the running daemon
+    Display {
+        #[command(subcommand)]
+        command: DisplayCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DisplayCommand {
+    /// Return connected outputs and exact advertised modes as JSON
+    Outputs,
+    /// Test and apply one advertised mode for a 15-second preview
+    Preview {
+        #[arg(long)]
+        output: String,
+        #[arg(long)]
+        mode: String,
+    },
+    /// Revert a pending preview by transaction ID
+    Revert {
+        #[arg(long)]
+        transaction: String,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -37,6 +68,30 @@ async fn main() -> Result<()> {
         .with(fmt::layer())
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level)))
         .init();
+
+    if let Some(Command::Display { command }) = args.command {
+        let request = match command {
+            DisplayCommand::Outputs => ClientRequest::Outputs,
+            DisplayCommand::Preview { output, mode } => ClientRequest::Preview {
+                output,
+                mode_id: mode,
+            },
+            DisplayCommand::Revert { transaction } => ClientRequest::Revert {
+                transaction_id: transaction,
+            },
+        };
+        if let Err(error) = nagame::ipc::run_client(request).await {
+            println!(
+                "{}",
+                serde_json::to_string(&ServerEvent::error(
+                    "daemon_unavailable",
+                    error.to_string()
+                ))?
+            );
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     info!("Starting nagame daemon");
 

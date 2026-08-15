@@ -218,7 +218,11 @@ impl WaylandClient {
                     "Compositor gave no configuration verdict within {:?}",
                     CONFIG_RESULT_TIMEOUT
                 );
-                return self.state.take_configuration_result();
+                self.state.retire_active_configuration();
+                return Err(anyhow::anyhow!(
+                    "Compositor gave no output configuration verdict within {:?}",
+                    CONFIG_RESULT_TIMEOUT
+                ));
             }
 
             tokio::time::sleep(CONFIG_RESULT_POLL).await;

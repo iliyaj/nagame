@@ -8,16 +8,20 @@ use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use tokio::io::unix::AsyncFd;
 use tokio::signal;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 pub mod awww;
 pub mod config;
+pub mod ipc;
+mod preview;
 pub mod profile;
 pub mod wayland;
 
 use config::Config;
+use preview::{PendingPreview, PreviewState, RevertRequest};
 use profile::ProfileManager;
-use wayland::OutputManager;
+use wayland::{HeadConfiguration, OutputManager};
 
 /// Safety-net interval for missed Wayland events.
 const HEARTBEAT_SECS: u64 = 60;
@@ -27,6 +31,13 @@ const RECONNECT_SECS: u64 = 1;
 
 /// Coalescing window for the event burst a single config save produces
 const CONFIG_DEBOUNCE: tokio::time::Duration = tokio::time::Duration::from_millis(300);
+
+const DISPLAY_PREVIEW_SECS: u64 = 15;
+
+struct PreviewPayload {
+    before: Vec<(String, HeadConfiguration)>,
+    responses: mpsc::UnboundedSender<ipc::ServerEvent>,
+}
 
 /// The last complete output configuration the daemon acted on
 struct OutputsSeen {
@@ -42,6 +53,7 @@ pub struct NagameDaemon {
     config: Config,
     output_manager: OutputManager,
     profile_manager: ProfileManager,
+    previews: PreviewState<PreviewPayload>,
 }
 
 impl NagameDaemon {
@@ -62,6 +74,7 @@ impl NagameDaemon {
             config,
             output_manager,
             profile_manager,
+            previews: PreviewState::default(),
         })
     }
 
@@ -94,6 +107,7 @@ impl NagameDaemon {
 
         // The watcher binding must outlive the loop because dropping it ends the file watch.
         let (mut config_watcher, _watcher) = self.setup_config_watcher().await?;
+        let (mut ipc_requests, _ipc_socket) = ipc::start_server().await?;
 
         // Drive output updates from complete configurations announced by Wayland.
         let mut readable = Self::watch_connection(&self.output_manager);
@@ -152,6 +166,14 @@ impl NagameDaemon {
                 }
             }
 
+            let preview_deadline = self.previews.deadline();
+            let preview_timeout = async move {
+                match preview_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+
             tokio::select! {
                 guard = readable.as_ref().unwrap().readable(), if readable.is_some() => {
                     match guard {
@@ -208,6 +230,9 @@ impl NagameDaemon {
                         }
 
                         if should_reload {
+                            if self.previews.is_pending() {
+                                let _ = self.revert_pending_preview("configuration_changed").await;
+                            }
                             info!("Config file changed - reloading");
                             if let Err(e) = self.reload_config().await {
                                 warn!("Failed to reload config: {}", e);
@@ -216,8 +241,25 @@ impl NagameDaemon {
                     }
                 }
 
+                request = ipc_requests.recv() => {
+                    if let Some(request) = request {
+                        self.handle_display_request(request).await;
+                    }
+                }
+
+                _ = preview_timeout => {
+                    if let Some(preview) = self.previews.take_if_expired(tokio::time::Instant::now()) {
+                        if let Err(error) = self.restore_preview(preview, "timeout").await {
+                            warn!("Failed to revert expired display preview: {}", error);
+                        }
+                    }
+                }
+
                 // Handle shutdown signals
                 _ = sigterm.recv() => {
+                    if let Err(error) = self.revert_pending_preview("daemon_shutdown").await {
+                        warn!("Failed to revert display preview before shutdown: {}", error);
+                    }
                     info!("Received SIGTERM - saving current wallpaper state before shutdown");
                     if let Err(e) = self.profile_manager.save_current_wallpaper().await {
                         warn!("Failed to save wallpaper state: {}", e);
@@ -226,6 +268,9 @@ impl NagameDaemon {
                     break;
                 }
                 _ = sigint.recv() => {
+                    if let Err(error) = self.revert_pending_preview("daemon_shutdown").await {
+                        warn!("Failed to revert display preview before shutdown: {}", error);
+                    }
                     info!("Received SIGINT - saving current wallpaper state before shutdown");
                     if let Err(e) = self.profile_manager.save_current_wallpaper().await {
                         warn!("Failed to save wallpaper state: {}", e);
@@ -237,6 +282,184 @@ impl NagameDaemon {
         }
 
         info!("Daemon shutdown complete");
+        Ok(())
+    }
+
+    async fn handle_display_request(&mut self, incoming: ipc::Incoming) {
+        let request = match incoming {
+            ipc::Incoming::Request(request) => request,
+            ipc::Incoming::Disconnected(client_id) => {
+                if let Some(preview) = self.previews.take_for_client(client_id) {
+                    if let Err(error) = self.restore_preview(preview, "client_disconnected").await {
+                        warn!("Failed to revert disconnected display preview: {}", error);
+                    }
+                }
+                return;
+            }
+        };
+
+        match request.request {
+            ipc::ClientRequest::Outputs => {
+                let outputs = self
+                    .output_manager
+                    .get_heads()
+                    .into_iter()
+                    .map(ipc::DisplayOutput::from)
+                    .collect();
+                let _ = request
+                    .responses
+                    .send(ipc::ServerEvent::Outputs { outputs });
+            }
+            ipc::ClientRequest::Preview { output, mode_id } => {
+                if self.previews.is_pending() {
+                    let _ = request.responses.send(ipc::ServerEvent::error(
+                        "preview_busy",
+                        "Another display preview is already pending",
+                    ));
+                    return;
+                }
+
+                let before = match self.output_manager.snapshot_configuration() {
+                    Ok(configuration) => configuration,
+                    Err(error) => {
+                        let _ = request.responses.send(ipc::ServerEvent::error(
+                            "invalid_live_state",
+                            error.to_string(),
+                        ));
+                        return;
+                    }
+                };
+                let candidate = match self.output_manager.candidate_with_mode(&output, &mode_id) {
+                    Ok(configuration) => configuration,
+                    Err(error) => {
+                        let _ = request
+                            .responses
+                            .send(ipc::ServerEvent::error("invalid_mode", error.to_string()));
+                        return;
+                    }
+                };
+                if let Err(error) = self.output_manager.test_configuration(&candidate).await {
+                    let _ = request.responses.send(ipc::ServerEvent::error(
+                        "compositor_test_failed",
+                        error.to_string(),
+                    ));
+                    return;
+                }
+                if let Err(error) = self.output_manager.apply_configuration(&candidate).await {
+                    let _ = request.responses.send(ipc::ServerEvent::error(
+                        "compositor_apply_failed",
+                        error.to_string(),
+                    ));
+                    return;
+                }
+
+                let deadline = tokio::time::Instant::now()
+                    + tokio::time::Duration::from_secs(DISPLAY_PREVIEW_SECS);
+                let transaction_id = self
+                    .previews
+                    .start(
+                        request.client_id,
+                        deadline,
+                        PreviewPayload {
+                            before,
+                            responses: request.responses.clone(),
+                        },
+                    )
+                    .expect("preview state changed while handling one request");
+
+                if request
+                    .responses
+                    .send(ipc::ServerEvent::PreviewStarted {
+                        transaction_id: transaction_id.clone(),
+                        remaining_ms: DISPLAY_PREVIEW_SECS * 1000,
+                    })
+                    .is_err()
+                {
+                    if let RevertRequest::Restore(preview) =
+                        self.previews.request_revert(&transaction_id)
+                    {
+                        if let Err(error) =
+                            self.restore_preview(preview, "client_disconnected").await
+                        {
+                            warn!("Failed to recover abandoned display preview: {}", error);
+                        }
+                    }
+                }
+            }
+            ipc::ClientRequest::Revert { transaction_id } => {
+                match self.previews.request_revert(&transaction_id) {
+                    RevertRequest::Restore(preview) => {
+                        match self.restore_preview(preview, "manual").await {
+                            Ok(()) => {
+                                let _ = request
+                                    .responses
+                                    .send(ipc::ServerEvent::RevertCompleted { transaction_id });
+                            }
+                            Err(error) => {
+                                let _ = request.responses.send(ipc::ServerEvent::error(
+                                    "revert_failed",
+                                    error.to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    RevertRequest::AlreadyCompleted => {
+                        let _ = request
+                            .responses
+                            .send(ipc::ServerEvent::RevertCompleted { transaction_id });
+                    }
+                    RevertRequest::NoPending => {
+                        let _ = request.responses.send(ipc::ServerEvent::error(
+                            "no_pending_preview",
+                            "There is no pending display preview",
+                        ));
+                    }
+                    RevertRequest::Mismatch => {
+                        let _ = request.responses.send(ipc::ServerEvent::error(
+                            "transaction_mismatch",
+                            "The display preview transaction no longer matches",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    async fn revert_pending_preview(&mut self, reason: &str) -> Result<()> {
+        let Some(preview) = self.previews.take_pending() else {
+            return Ok(());
+        };
+        self.restore_preview(preview, reason).await
+    }
+
+    async fn restore_preview(
+        &mut self,
+        mut preview: PendingPreview<PreviewPayload>,
+        reason: &str,
+    ) -> Result<()> {
+        if let Err(error) = self
+            .output_manager
+            .apply_configuration(&preview.payload.before)
+            .await
+        {
+            preview.deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+            let _ = preview
+                .payload
+                .responses
+                .send(ipc::ServerEvent::error("revert_failed", error.to_string()));
+            self.previews.retry(preview);
+            return Err(error);
+        }
+
+        let transaction_id = preview.id;
+        let _ = preview
+            .payload
+            .responses
+            .send(ipc::ServerEvent::PreviewReverted {
+                transaction_id: transaction_id.clone(),
+                reason: reason.to_string(),
+            });
+        self.previews.complete(transaction_id);
         Ok(())
     }
 

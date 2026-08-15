@@ -108,7 +108,7 @@ pub struct WaylandState {
     pub active_config: Option<ZwlrOutputConfigurationV1>,
     /// Last serial number from done event
     pub last_serial: Option<u32>,
-    /// Result reported for the most recently submitted configuration.
+    /// Result reported by the active configuration object.
     configuration_outcome: Option<ConfigurationOutcome>,
     /// Temporary storage for heads being built (keyed by object ID)
     pub pending_heads: HashMap<u32, OutputHead>,
@@ -222,6 +222,10 @@ impl WaylandState {
 
     /// Create a new output configuration
     pub fn create_configuration(&mut self, qh: &QueueHandle<Self>) -> Result<()> {
+        // A timed-out or otherwise abandoned object must not survive into the next
+        // submission, where its late verdict could be mistaken for the new one.
+        self.retire_active_configuration();
+
         let manager = self
             .output_manager
             .as_ref()
@@ -235,6 +239,18 @@ impl WaylandState {
         self.configuration_outcome = None;
         debug!("Created output configuration for serial {}", serial);
         Ok(())
+    }
+
+    /// Retire the current submission and discard any verdict associated with it.
+    pub fn retire_active_configuration(&mut self) {
+        self.configuration_outcome = None;
+        if let Some(config) = self.active_config.take() {
+            debug!(
+                "Destroying retired output configuration object {}",
+                config.id().protocol_id()
+            );
+            config.destroy();
+        }
     }
 
     /// Configure a specific output head
@@ -734,29 +750,46 @@ impl Dispatch<ZwlrOutputModeV1, u32> for WaylandState {
 impl Dispatch<ZwlrOutputConfigurationV1, ()> for WaylandState {
     fn event(
         state: &mut Self,
-        _config: &ZwlrOutputConfigurationV1,
+        config: &ZwlrOutputConfigurationV1,
         event: zwlr_output_configuration_v1::Event,
         _: &(),
         _: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        match event {
+        let is_active = state
+            .active_config
+            .as_ref()
+            .is_some_and(|active| active.id() == config.id());
+        if !is_active {
+            debug!(
+                "Ignoring verdict from stale output configuration object {}",
+                config.id().protocol_id()
+            );
+            return;
+        }
+
+        let outcome = match event {
             zwlr_output_configuration_v1::Event::Succeeded => {
                 info!("Output configuration succeeded");
-                state.configuration_outcome = Some(ConfigurationOutcome::Succeeded);
-                state.active_config = None;
+                Some(ConfigurationOutcome::Succeeded)
             }
             zwlr_output_configuration_v1::Event::Failed => {
                 error!("Output configuration failed");
-                state.configuration_outcome = Some(ConfigurationOutcome::Failed);
-                state.active_config = None;
+                Some(ConfigurationOutcome::Failed)
             }
             zwlr_output_configuration_v1::Event::Cancelled => {
                 warn!("Output configuration cancelled");
-                state.configuration_outcome = Some(ConfigurationOutcome::Cancelled);
-                state.active_config = None;
+                Some(ConfigurationOutcome::Cancelled)
             }
-            _ => {}
+            _ => None,
+        };
+
+        if let Some(outcome) = outcome {
+            // The protocol requires clients to destroy the configuration after its
+            // terminal verdict. Only this object's result may satisfy the waiter.
+            config.destroy();
+            state.active_config = None;
+            state.configuration_outcome = Some(outcome);
         }
     }
 }

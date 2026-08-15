@@ -12,6 +12,7 @@ PartOf=graphical-session.target
 [Service]
 Type=exec
 ExecStart=/usr/local/bin/nagame --config %h/.config/nagame/config.toml
+RuntimeDirectory=nagame
 Restart=always
 RestartSec=5
 StandardOutput=journal
