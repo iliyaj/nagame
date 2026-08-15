@@ -25,6 +25,14 @@ The build requires Rust 1.86 or later. At runtime, nagame requires a Wayland com
 
 The default configuration path is `~/.config/nagame/config.toml`. The included [`config.toml.example`](config.toml.example) contains additional profile examples.
 
+For a safe first configuration, connect the displays you want to use and run:
+
+```bash
+nagame init
+```
+
+Nagame reads the live output topology through Wayland and creates one minimal profile containing each connector's enabled state, exact current mode, position, scale, transform, and adaptive-sync state. The file and its parent directory are private. Initialization is atomic and refuses to overwrite any existing file or symlink.
+
 Each `[[profile]]` describes a monitor arrangement. A profile matches when its configured outputs match the outputs reported by the compositor.
 
 ```toml

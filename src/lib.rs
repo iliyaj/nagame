@@ -13,6 +13,7 @@ use tracing::{info, warn};
 
 pub mod awww;
 pub mod config;
+pub mod initialize;
 pub mod ipc;
 mod preview;
 pub mod profile;

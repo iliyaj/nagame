@@ -6,6 +6,7 @@
 use super::Config;
 use anyhow::{anyhow, Context, Result};
 use sha2::{Digest, Sha256};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::fs;
@@ -24,6 +25,50 @@ pub async fn read_with_revision(path: &Path) -> Result<(String, String)> {
         .with_context(|| format!("Failed to read config file: {}", path.display()))?;
     let revision = revision(&content);
     Ok((content, revision))
+}
+
+/// Atomically creates a new private configuration without replacing any path.
+pub async fn create_new(path: &Path, content: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("Config path has no parent directory"))?;
+    fs::create_dir_all(parent)
+        .await
+        .with_context(|| format!("Failed to create {}", parent.display()))?;
+    fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).await?;
+
+    let suffix = NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
+    let temp_path = parent.join(format!(
+        ".config.toml.nagame-init-{}-{suffix}.tmp",
+        std::process::id()
+    ));
+
+    let result = async {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true).mode(0o600);
+        let mut file = options
+            .open(&temp_path)
+            .await
+            .with_context(|| format!("Failed to create {}", temp_path.display()))?;
+        file.write_all(content.as_bytes()).await?;
+        file.sync_all().await?;
+        drop(file);
+
+        // hard_link is an atomic no-replace publication within this directory.
+        fs::hard_link(&temp_path, path)
+            .await
+            .with_context(|| format!("Refusing to replace existing config: {}", path.display()))?;
+        fs::remove_file(&temp_path).await?;
+        let directory = fs::File::open(parent).await?;
+        directory.sync_all().await?;
+        Ok(())
+    }
+    .await;
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path).await;
+    }
+    result
 }
 
 pub fn update_output_mode(
@@ -232,5 +277,49 @@ mode = "2560x1440@120"
             .file_type()
             .is_symlink());
         assert_eq!(fs::read_to_string(&target).await.unwrap(), "replacement\n");
+    }
+
+    #[tokio::test]
+    async fn create_new_publishes_a_private_complete_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("nagame");
+        let path = parent.join("config.toml");
+
+        create_new(&path, SOURCE).await.unwrap();
+
+        assert_eq!(fs::read_to_string(&path).await.unwrap(), SOURCE);
+        assert_eq!(
+            fs::metadata(&path).await.unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&parent).await.unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let mut entries = fs::read_dir(&parent).await.unwrap();
+        assert_eq!(entries.next_entry().await.unwrap().unwrap().path(), path);
+        assert!(entries.next_entry().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn create_new_never_replaces_an_existing_path() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("tracked-config.toml");
+        let path = directory.path().join("config.toml");
+        fs::write(&target, "user configuration\n").await.unwrap();
+        symlink(&target, &path).unwrap();
+
+        assert!(create_new(&path, SOURCE).await.is_err());
+        assert!(fs::symlink_metadata(&path)
+            .await
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_to_string(&target).await.unwrap(),
+            "user configuration\n"
+        );
     }
 }

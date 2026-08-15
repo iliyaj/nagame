@@ -26,7 +26,7 @@ TimeoutStopSec=30
 PrivateNetwork=false
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/.local/state
+ReadWritePaths=%h/.local/state %h/.config/nagame
 NoNewPrivileges=true
 
 [Install]

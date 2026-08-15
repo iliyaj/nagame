@@ -33,6 +33,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Create the first profile from the live Wayland output configuration
+    Init,
     /// Query and temporarily preview display modes through the running daemon
     Display {
         #[command(subcommand)]
@@ -78,6 +80,27 @@ async fn main() -> Result<()> {
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level)))
         .init();
 
+    if let Some(Command::Init) = args.command {
+        let config_path = config_path(args.config);
+        match nagame::initialize::initialize_config(&config_path).await {
+            Ok(()) => println!(
+                "{}",
+                serde_json::json!({
+                    "event": "initialized",
+                    "config": config_path,
+                })
+            ),
+            Err(error) => {
+                println!(
+                    "{}",
+                    serde_json::to_string(&ServerEvent::error("init_failed", error.to_string()))?
+                );
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
     if let Some(Command::Display { command }) = args.command {
         let request = match command {
             DisplayCommand::Outputs => ClientRequest::Outputs,
@@ -115,12 +138,7 @@ async fn main() -> Result<()> {
     info!("Starting nagame daemon");
 
     // Determine config file path
-    let config_path = args.config.unwrap_or_else(|| {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("nagame")
-            .join("config.toml")
-    });
+    let config_path = config_path(args.config);
 
     info!("Using config file: {}", config_path.display());
 
@@ -142,4 +160,13 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn config_path(config: Option<PathBuf>) -> PathBuf {
+    config.unwrap_or_else(|| {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("nagame")
+            .join("config.toml")
+    })
 }

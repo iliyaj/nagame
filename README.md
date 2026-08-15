@@ -31,16 +31,16 @@ git clone https://github.com/iliyaj/nagame.git
 cd nagame
 ./scripts/build-release.sh
 sudo cp target/release/nagame /usr/local/bin/
-
-mkdir -p ~/.config/nagame
-cp config.toml.example ~/.config/nagame/config.toml
-```
-
-Edit `~/.config/nagame/config.toml` for your displays and wallpaper paths, then validate it before starting the daemon:
-
-```bash
+nagame init
 nagame --test-only
 nagame
+```
+
+The command refuses to replace an existing configuration. You can instead copy and edit the extended example when you want named docked layouts, wallpapers, or activation commands:
+
+```bash
+mkdir -p ~/.config/nagame
+cp config.toml.example ~/.config/nagame/config.toml
 ```
 
 ## Architecture
