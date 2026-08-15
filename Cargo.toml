@@ -4,7 +4,7 @@
 
 [package]
 name = "nagame"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 rust-version = "1.86"
 description = "Dynamic Wayland display and wallpaper manager - autorandr for Wayland with integrated awww wallpaper management"
