@@ -196,6 +196,16 @@ impl WaylandClient {
         self.await_configuration_result().await
     }
 
+    /// Adopt a compositor-confirmed configuration before its follow-up head events arrive.
+    pub fn adopt_configuration(&mut self, configuration: &[(String, HeadConfiguration)]) {
+        for (name, config) in configuration {
+            let Some(head) = self.state.heads.get_mut(name) else {
+                continue;
+            };
+            adopt_head_configuration(head, config);
+        }
+    }
+
     /// Test the current configuration
     pub async fn test_configuration(&mut self) -> Result<()> {
         self.state.test_configuration()?;
@@ -247,5 +257,70 @@ impl WaylandClient {
     /// Get connection for low-level operations
     pub fn connection(&self) -> &Connection {
         &self.connection
+    }
+}
+
+fn adopt_head_configuration(head: &mut OutputHead, config: &HeadConfiguration) {
+    head.enabled = config.enabled;
+    if let Some(mode) = &config.mode {
+        head.current_mode = Some(mode.clone());
+    }
+    if let Some(position) = config.position {
+        head.position = Some(position);
+    }
+    if let Some(transform) = config.transform {
+        head.transform = transform;
+    }
+    if let Some(scale) = config.scale {
+        head.scale = scale;
+    }
+    if let Some(adaptive_sync) = config.adaptive_sync {
+        head.adaptive_sync = Some(adaptive_sync);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wayland::OutputMode;
+    use wayland_client::protocol::wl_output;
+
+    #[test]
+    fn adopting_a_modeless_configuration_keeps_the_advertised_current_mode() {
+        let current_mode = OutputMode {
+            width: 2560,
+            height: 1440,
+            refresh_mhz: 143_973,
+            preferred: true,
+        };
+        let mut head = OutputHead {
+            id: 1,
+            name: "DP-1".to_string(),
+            description: String::new(),
+            physical_size: None,
+            position: Some((0, 0)),
+            transform: wl_output::Transform::Normal,
+            scale: 1.0,
+            enabled: true,
+            modes: vec![current_mode.clone()],
+            current_mode: Some(current_mode.clone()),
+            preferred_mode: Some(current_mode.clone()),
+            make: String::new(),
+            model: String::new(),
+            serial_number: String::new(),
+            adaptive_sync: None,
+        };
+        let config = HeadConfiguration {
+            enabled: true,
+            mode: None,
+            position: None,
+            transform: None,
+            scale: None,
+            adaptive_sync: None,
+        };
+
+        adopt_head_configuration(&mut head, &config);
+
+        assert_eq!(head.current_mode, Some(current_mode));
     }
 }

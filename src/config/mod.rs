@@ -4,6 +4,7 @@
 //! Loads and validates nagame's TOML configuration.
 
 pub mod parser;
+pub mod persistence;
 pub mod types;
 
 pub use types::*;

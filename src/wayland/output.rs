@@ -296,7 +296,9 @@ impl OutputManager {
         if test_only {
             client.test_configuration().await
         } else {
-            client.apply_configuration().await
+            client.apply_configuration().await?;
+            client.adopt_configuration(configuration);
+            Ok(())
         }
     }
 
@@ -362,6 +364,23 @@ impl OutputManager {
             output_configs.push((output, head_name, mode, transform));
         }
 
+        let configuration: Vec<_> = output_configs
+            .into_iter()
+            .map(|(output, head_name, mode, transform)| {
+                (
+                    head_name,
+                    HeadConfiguration {
+                        enabled: output.enabled,
+                        mode,
+                        position: output.position.map(|p| (p[0], p[1])),
+                        transform,
+                        scale: output.scale,
+                        adaptive_sync: output.adaptive_sync,
+                    },
+                )
+            })
+            .collect();
+
         // Now get mutable reference to client and use it
         let client = match self.wayland_client.as_mut() {
             Some(client) => client,
@@ -372,17 +391,8 @@ impl OutputManager {
         client.create_configuration().await?;
 
         // Configure each output
-        for (output, head_name, mode, transform) in output_configs {
-            let head_config = HeadConfiguration {
-                enabled: output.enabled,
-                mode: mode.clone(),
-                position: output.position.map(|p| (p[0], p[1])),
-                transform,
-                scale: output.scale,
-                adaptive_sync: output.adaptive_sync,
-            };
-
-            if let Err(e) = client.configure_head(&head_name, &head_config).await {
+        for (head_name, head_config) in &configuration {
+            if let Err(e) = client.configure_head(head_name, head_config).await {
                 error!("Failed to configure output '{}': {}", head_name, e);
                 return Ok(false);
             }
@@ -391,6 +401,7 @@ impl OutputManager {
         // Apply the configuration
         match client.apply_configuration().await {
             Ok(()) => {
+                client.adopt_configuration(&configuration);
                 info!(
                     "Successfully applied display configuration for profile '{}'",
                     profile.name
@@ -640,7 +651,7 @@ fn parse_mode_string(mode_str: &str) -> Result<(i32, i32, Option<i32>)> {
 
     let refresh = if parts.len() > 1 {
         let rate: f64 = parts[1].parse()?;
-        Some((rate * 1000.0) as i32) // Convert to millihertz
+        Some((rate * 1000.0).round() as i32) // Convert to millihertz
     } else {
         None
     };
@@ -663,5 +674,11 @@ mod tests {
         assert_eq!(width, 2560);
         assert_eq!(height, 1440);
         assert_eq!(refresh, None);
+
+        let (_, _, refresh) = parse_mode_string("2560x1440@143.973").unwrap();
+        assert_eq!(refresh, Some(143_973));
+
+        let (_, _, refresh) = parse_mode_string("1920x1080@99.95").unwrap();
+        assert_eq!(refresh, Some(99_950));
     }
 }

@@ -50,6 +50,15 @@ enum DisplayCommand {
         output: String,
         #[arg(long)]
         mode: String,
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        revision: String,
+    },
+    /// Persist a pending preview by transaction ID
+    Confirm {
+        #[arg(long)]
+        transaction: String,
     },
     /// Revert a pending preview by transaction ID
     Revert {
@@ -72,9 +81,19 @@ async fn main() -> Result<()> {
     if let Some(Command::Display { command }) = args.command {
         let request = match command {
             DisplayCommand::Outputs => ClientRequest::Outputs,
-            DisplayCommand::Preview { output, mode } => ClientRequest::Preview {
+            DisplayCommand::Preview {
+                output,
+                mode,
+                profile,
+                revision,
+            } => ClientRequest::Preview {
                 output,
                 mode_id: mode,
+                profile,
+                revision,
+            },
+            DisplayCommand::Confirm { transaction } => ClientRequest::Confirm {
+                transaction_id: transaction,
             },
             DisplayCommand::Revert { transaction } => ClientRequest::Revert {
                 transaction_id: transaction,

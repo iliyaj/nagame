@@ -16,7 +16,7 @@ The project is in an early stage. It is currently tested on Arch Linux with Hypr
 - Preserves wallpaper choices across display changes and sleep.
 - Reloads its TOML configuration when the file changes.
 - Can run commands after activating a profile.
-- Exposes connected modes and safe 15-second previews through a local JSON command interface.
+- Exposes connected modes and safe 15-second keep-or-revert transactions through a local JSON command interface.
 
 ## Requirements
 
@@ -51,7 +51,7 @@ nagame is divided into six main parts:
 - The profile manager matches connected outputs to configured profiles.
 - The `awww` integration applies and restores wallpapers.
 - The configuration watcher reloads the TOML file after changes.
-- The private Unix socket exposes structured output discovery and preview/revert transactions.
+- The private Unix socket exposes structured output discovery and preview/confirm/revert transactions.
 - The Tokio event loop coordinates display, signal, and configuration events.
 
 ## Documentation

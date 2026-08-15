@@ -14,14 +14,27 @@ pub struct PendingPreview<T> {
 
 pub enum RevertRequest<T> {
     Restore(PendingPreview<T>),
-    AlreadyCompleted,
+    AlreadyReverted,
     NoPending,
     Mismatch,
 }
 
+pub enum ConfirmRequest<T> {
+    Persist(PendingPreview<T>),
+    AlreadyConfirmed,
+    NoPending,
+    Mismatch,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Completion {
+    Reverted,
+    Confirmed,
+}
+
 pub struct PreviewState<T> {
     pending: Option<PendingPreview<T>>,
-    last_completed_id: Option<String>,
+    last_completed: Option<(String, Completion)>,
     next_transaction: u64,
 }
 
@@ -29,7 +42,7 @@ impl<T> Default for PreviewState<T> {
     fn default() -> Self {
         Self {
             pending: None,
-            last_completed_id: None,
+            last_completed: None,
             next_transaction: 1,
         }
     }
@@ -65,26 +78,42 @@ impl<T> PreviewState<T> {
     }
 
     pub fn request_revert(&mut self, transaction_id: &str) -> RevertRequest<T> {
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|preview| preview.id == transaction_id)
-        {
-            return RevertRequest::Restore(
-                self.pending
-                    .take()
-                    .expect("matching display preview must still be pending"),
-            );
+        if let Some(preview) = self.pending.take_if(|preview| preview.id == transaction_id) {
+            return RevertRequest::Restore(preview);
         }
 
-        if self.last_completed_id.as_deref() == Some(transaction_id) {
-            return RevertRequest::AlreadyCompleted;
+        if self
+            .last_completed
+            .as_ref()
+            .is_some_and(|(id, outcome)| id == transaction_id && *outcome == Completion::Reverted)
+        {
+            return RevertRequest::AlreadyReverted;
         }
 
         if self.pending.is_some() {
             RevertRequest::Mismatch
         } else {
             RevertRequest::NoPending
+        }
+    }
+
+    pub fn request_confirm(&mut self, transaction_id: &str) -> ConfirmRequest<T> {
+        if let Some(preview) = self.pending.take_if(|preview| preview.id == transaction_id) {
+            return ConfirmRequest::Persist(preview);
+        }
+
+        if self
+            .last_completed
+            .as_ref()
+            .is_some_and(|(id, outcome)| id == transaction_id && *outcome == Completion::Confirmed)
+        {
+            return ConfirmRequest::AlreadyConfirmed;
+        }
+
+        if self.pending.is_some() {
+            ConfirmRequest::Mismatch
+        } else {
+            ConfirmRequest::NoPending
         }
     }
 
@@ -121,8 +150,8 @@ impl<T> PreviewState<T> {
         self.pending = Some(preview);
     }
 
-    pub fn complete(&mut self, transaction_id: String) {
-        self.last_completed_id = Some(transaction_id);
+    pub fn complete(&mut self, transaction_id: String, outcome: Completion) {
+        self.last_completed = Some((transaction_id, outcome));
     }
 }
 
@@ -197,17 +226,39 @@ mod tests {
             RevertRequest::Restore(preview) => preview,
             _ => panic!("preview was not selected for restore"),
         };
-        state.complete(old.id);
+        state.complete(old.id, Completion::Reverted);
         let current = state.start(2, deadline(15), ()).unwrap();
 
         assert!(matches!(
             state.request_revert(&completed),
-            RevertRequest::AlreadyCompleted
+            RevertRequest::AlreadyReverted
         ));
         assert!(state.is_pending());
         assert!(matches!(
             state.request_revert(&current),
             RevertRequest::Restore(_)
+        ));
+    }
+
+    #[test]
+    fn completed_confirmation_is_idempotent_without_touching_a_new_preview() {
+        let mut state = PreviewState::default();
+        let completed = state.start(1, deadline(15), ()).unwrap();
+        let old = match state.request_confirm(&completed) {
+            ConfirmRequest::Persist(preview) => preview,
+            _ => panic!("matching transaction was not selected for persistence"),
+        };
+        state.complete(old.id, Completion::Confirmed);
+        let current = state.start(2, deadline(15), ()).unwrap();
+
+        assert!(matches!(
+            state.request_confirm(&completed),
+            ConfirmRequest::AlreadyConfirmed
+        ));
+        assert!(state.is_pending());
+        assert!(matches!(
+            state.request_confirm(&current),
+            ConfirmRequest::Persist(_)
         ));
     }
 

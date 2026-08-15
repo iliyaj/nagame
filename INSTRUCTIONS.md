@@ -122,15 +122,23 @@ The running daemon exposes a private JSON interface through its Unix socket. Lis
 nagame display outputs
 ```
 
-Copy an advertised mode ID from that response to start a safe preview:
+The response also includes the active profile and a configuration revision. Copy those values and an advertised mode ID to start a safe preview:
 
 ```bash
-nagame display preview --output DP-1 --mode 2560x1440@144000mHz
+nagame display preview --output DP-1 --mode 2560x1440@144000mHz --profile PROFILE --revision REVISION
 ```
 
-Nagame tests the complete candidate configuration before applying it. The preview lasts 15 seconds and always restores the previous live configuration; it never writes the TOML file. Keep the preview command running while presenting the countdown because disconnecting it also triggers an immediate revert.
+Nagame tests the complete candidate configuration before applying it. The preview lasts 15 seconds and restores the previous live configuration unless it is explicitly confirmed. Keep the preview command running while presenting the countdown because disconnecting it triggers an immediate revert.
 
-The first preview event includes a transaction ID. A second process can request an earlier revert:
+The first preview event includes a transaction ID. A second process can persist the selected mode to the matching profile:
+
+```bash
+nagame display confirm --transaction TRANSACTION_ID
+```
+
+Confirmation succeeds only while the configuration revision still matches. Nagame changes only the matched output's `mode`, validates the complete document, and atomically replaces the TOML file while retaining unrelated values and comments. A newer manual edit wins and causes the preview to revert.
+
+A second process can instead request an earlier revert:
 
 ```bash
 nagame display revert --transaction TRANSACTION_ID

@@ -3,7 +3,7 @@
 
 //! Implements the nagame daemon that manages Wayland displays and wallpapers.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use tokio::io::unix::AsyncFd;
@@ -18,10 +18,11 @@ mod preview;
 pub mod profile;
 pub mod wayland;
 
-use config::Config;
-use preview::{PendingPreview, PreviewState, RevertRequest};
+use config::{persistence, Config};
+use preview::{Completion, ConfirmRequest, PendingPreview, PreviewState, RevertRequest};
+use profile::matcher::resolve_profile_outputs;
 use profile::ProfileManager;
-use wayland::{HeadConfiguration, OutputManager};
+use wayland::{HeadConfiguration, OutputManager, OutputMode};
 
 /// Safety-net interval for missed Wayland events.
 const HEARTBEAT_SECS: u64 = 60;
@@ -36,6 +37,10 @@ const DISPLAY_PREVIEW_SECS: u64 = 15;
 
 struct PreviewPayload {
     before: Vec<(String, HeadConfiguration)>,
+    config_revision: String,
+    mode: String,
+    output_index: usize,
+    profile: String,
     responses: mpsc::UnboundedSender<ipc::ServerEvent>,
 }
 
@@ -51,6 +56,7 @@ struct OutputsSeen {
 pub struct NagameDaemon {
     config_path: PathBuf,
     config: Config,
+    config_revision: String,
     output_manager: OutputManager,
     profile_manager: ProfileManager,
     previews: PreviewState<PreviewPayload>,
@@ -61,7 +67,14 @@ impl NagameDaemon {
     pub async fn new(config_path: PathBuf) -> Result<Self> {
         info!("Initializing nagame daemon");
 
-        let config = Config::load(&config_path).await?;
+        // Resolve a dotfiles symlink once so both persistence and file watching follow its target.
+        let config_path = tokio::fs::canonicalize(&config_path)
+            .await
+            .with_context(|| format!("Failed to resolve config file: {}", config_path.display()))?;
+        let (config_source, config_revision) =
+            persistence::read_with_revision(&config_path).await?;
+        let config = Config::from_toml(&config_source)
+            .with_context(|| format!("Failed to parse config file: {}", config_path.display()))?;
         info!("Loaded {} profiles from config", config.profiles.len());
 
         let mut output_manager = OutputManager::new();
@@ -72,6 +85,7 @@ impl NagameDaemon {
         Ok(Self {
             config_path,
             config,
+            config_revision,
             output_manager,
             profile_manager,
             previews: PreviewState::default(),
@@ -230,6 +244,14 @@ impl NagameDaemon {
                         }
 
                         if should_reload {
+                            let disk_revision = persistence::read_with_revision(&self.config_path)
+                                .await
+                                .map(|(_, revision)| revision);
+                            if disk_revision.as_ref().is_ok_and(|revision| {
+                                revision == &self.config_revision
+                            }) {
+                                continue;
+                            }
                             if self.previews.is_pending() {
                                 let _ = self.revert_pending_preview("configuration_changed").await;
                             }
@@ -306,11 +328,19 @@ impl NagameDaemon {
                     .into_iter()
                     .map(ipc::DisplayOutput::from)
                     .collect();
-                let _ = request
-                    .responses
-                    .send(ipc::ServerEvent::Outputs { outputs });
+                let _ = request.responses.send(ipc::ServerEvent::Outputs {
+                    outputs,
+                    active_profile: self.profile_manager.current_profile().cloned(),
+                    revision: self.config_revision.clone(),
+                    supported: self.output_manager.is_available(),
+                });
             }
-            ipc::ClientRequest::Preview { output, mode_id } => {
+            ipc::ClientRequest::Preview {
+                output,
+                mode_id,
+                profile,
+                revision,
+            } => {
                 if self.previews.is_pending() {
                     let _ = request.responses.send(ipc::ServerEvent::error(
                         "preview_busy",
@@ -318,6 +348,45 @@ impl NagameDaemon {
                     ));
                     return;
                 }
+
+                let disk_revision = match persistence::read_with_revision(&self.config_path).await {
+                    Ok((_, revision)) => revision,
+                    Err(error) => {
+                        let _ = request.responses.send(ipc::ServerEvent::error(
+                            "config_read_failed",
+                            error.to_string(),
+                        ));
+                        return;
+                    }
+                };
+                if revision != self.config_revision || revision != disk_revision {
+                    let _ = request.responses.send(ipc::ServerEvent::error(
+                        "config_conflict",
+                        "The display configuration changed elsewhere. Refresh and try again.",
+                    ));
+                    return;
+                }
+                if self.profile_manager.current_profile().map(String::as_str)
+                    != Some(profile.as_str())
+                {
+                    let _ = request.responses.send(ipc::ServerEvent::error(
+                        "profile_changed",
+                        "The active display profile changed. Refresh and try again.",
+                    ));
+                    return;
+                }
+
+                let (output_index, mode) =
+                    match self.preview_persistence_target(&profile, &output, &mode_id) {
+                        Ok(target) => target,
+                        Err(error) => {
+                            let _ = request.responses.send(ipc::ServerEvent::error(
+                                "invalid_profile_target",
+                                error.to_string(),
+                            ));
+                            return;
+                        }
+                    };
 
                 let before = match self.output_manager.snapshot_configuration() {
                     Ok(configuration) => configuration,
@@ -362,6 +431,10 @@ impl NagameDaemon {
                         deadline,
                         PreviewPayload {
                             before,
+                            config_revision: revision,
+                            mode,
+                            output_index,
+                            profile,
                             responses: request.responses.clone(),
                         },
                     )
@@ -386,6 +459,41 @@ impl NagameDaemon {
                     }
                 }
             }
+            ipc::ClientRequest::Confirm { transaction_id } => {
+                match self.previews.request_confirm(&transaction_id) {
+                    ConfirmRequest::Persist(preview) => match self.persist_preview(preview).await {
+                        Ok(revision) => {
+                            let _ = request.responses.send(ipc::ServerEvent::ConfirmCompleted {
+                                transaction_id,
+                                revision,
+                            });
+                        }
+                        Err((code, message)) => {
+                            let _ = request
+                                .responses
+                                .send(ipc::ServerEvent::error(code, message));
+                        }
+                    },
+                    ConfirmRequest::AlreadyConfirmed => {
+                        let _ = request.responses.send(ipc::ServerEvent::ConfirmCompleted {
+                            transaction_id,
+                            revision: self.config_revision.clone(),
+                        });
+                    }
+                    ConfirmRequest::NoPending => {
+                        let _ = request.responses.send(ipc::ServerEvent::error(
+                            "no_pending_preview",
+                            "There is no pending display preview",
+                        ));
+                    }
+                    ConfirmRequest::Mismatch => {
+                        let _ = request.responses.send(ipc::ServerEvent::error(
+                            "transaction_mismatch",
+                            "The display preview transaction no longer matches",
+                        ));
+                    }
+                }
+            }
             ipc::ClientRequest::Revert { transaction_id } => {
                 match self.previews.request_revert(&transaction_id) {
                     RevertRequest::Restore(preview) => {
@@ -403,7 +511,7 @@ impl NagameDaemon {
                             }
                         }
                     }
-                    RevertRequest::AlreadyCompleted => {
+                    RevertRequest::AlreadyReverted => {
                         let _ = request
                             .responses
                             .send(ipc::ServerEvent::RevertCompleted { transaction_id });
@@ -430,6 +538,150 @@ impl NagameDaemon {
             return Ok(());
         };
         self.restore_preview(preview, reason).await
+    }
+
+    fn cancel_pending_preview(&mut self, reason: &str) {
+        let Some(preview) = self.previews.take_pending() else {
+            return;
+        };
+        let transaction_id = preview.id;
+        let _ = preview
+            .payload
+            .responses
+            .send(ipc::ServerEvent::PreviewReverted {
+                transaction_id: transaction_id.clone(),
+                reason: reason.to_string(),
+            });
+        self.previews.complete(transaction_id, Completion::Reverted);
+    }
+
+    fn preview_persistence_target(
+        &self,
+        profile_name: &str,
+        output_name: &str,
+        mode_id: &str,
+    ) -> Result<(usize, String)> {
+        let profile = self
+            .config
+            .profiles
+            .iter()
+            .find(|profile| profile.name == profile_name)
+            .with_context(|| format!("Profile '{}' no longer exists", profile_name))?;
+        let heads = self.output_manager.get_heads();
+        let output_index = resolve_profile_outputs(profile, &heads)
+            .and_then(|outputs| {
+                outputs
+                    .into_iter()
+                    .enumerate()
+                    .find_map(|(index, (_, connector))| (connector == output_name).then_some(index))
+            })
+            .with_context(|| {
+                format!(
+                    "Output '{}' is not part of active profile '{}'",
+                    output_name, profile_name
+                )
+            })?;
+        let mode = self
+            .output_manager
+            .get_head(output_name)
+            .and_then(|head| head.modes.iter().find(|mode| ipc::mode_id(mode) == mode_id))
+            .map(Self::persistent_mode)
+            .with_context(|| {
+                format!(
+                    "Mode '{}' is not advertised by output '{}'",
+                    mode_id, output_name
+                )
+            })?;
+        Ok((output_index, mode))
+    }
+
+    fn persistent_mode(mode: &OutputMode) -> String {
+        let whole = mode.refresh_mhz / 1000;
+        let fraction = mode.refresh_mhz.rem_euclid(1000);
+        if fraction == 0 {
+            format!("{}x{}@{}", mode.width, mode.height, whole)
+        } else {
+            let refresh = format!("{}.{:03}", whole, fraction)
+                .trim_end_matches('0')
+                .to_string();
+            format!("{}x{}@{}", mode.width, mode.height, refresh)
+        }
+    }
+
+    async fn persist_preview(
+        &mut self,
+        preview: PendingPreview<PreviewPayload>,
+    ) -> std::result::Result<String, (&'static str, String)> {
+        let transaction_id = preview.id.clone();
+        let (source, revision) = match persistence::read_with_revision(&self.config_path).await {
+            Ok(result) => result,
+            Err(error) => {
+                let message = error.to_string();
+                if let Err(revert_error) = self.restore_preview(preview, "persistence_failed").await
+                {
+                    return Err((
+                        "revert_failed",
+                        format!("{message}; the preview also failed to revert: {revert_error}"),
+                    ));
+                }
+                return Err(("config_read_failed", message));
+            }
+        };
+
+        if revision != preview.payload.config_revision {
+            if let Err(error) = self.restore_preview(preview, "configuration_changed").await {
+                return Err(("revert_failed", error.to_string()));
+            }
+            return Err((
+                "config_conflict",
+                "The display configuration changed elsewhere. The newer configuration won."
+                    .to_string(),
+            ));
+        }
+
+        let (updated_source, updated_config) = match persistence::update_output_mode(
+            &source,
+            &preview.payload.profile,
+            preview.payload.output_index,
+            &preview.payload.mode,
+        ) {
+            Ok(updated) => updated,
+            Err(error) => {
+                let message = error.to_string();
+                if let Err(revert_error) = self.restore_preview(preview, "persistence_failed").await
+                {
+                    return Err((
+                        "revert_failed",
+                        format!("{message}; the preview also failed to revert: {revert_error}"),
+                    ));
+                }
+                return Err(("config_update_failed", message));
+            }
+        };
+
+        if let Err(error) = persistence::atomic_write(&self.config_path, &updated_source).await {
+            let message = error.to_string();
+            if let Err(revert_error) = self.restore_preview(preview, "persistence_failed").await {
+                return Err((
+                    "revert_failed",
+                    format!("{message}; the preview also failed to revert: {revert_error}"),
+                ));
+            }
+            return Err(("config_write_failed", message));
+        }
+
+        self.config_revision = persistence::revision(&updated_source);
+        self.config = updated_config;
+        let _ = preview
+            .payload
+            .responses
+            .send(ipc::ServerEvent::PreviewConfirmed {
+                transaction_id: transaction_id.clone(),
+                revision: self.config_revision.clone(),
+            });
+        self.previews
+            .complete(transaction_id, Completion::Confirmed);
+        Ok(self.config_revision.clone())
     }
 
     async fn restore_preview(
@@ -459,7 +711,7 @@ impl NagameDaemon {
                 transaction_id: transaction_id.clone(),
                 reason: reason.to_string(),
             });
-        self.previews.complete(transaction_id);
+        self.previews.complete(transaction_id, Completion::Reverted);
         Ok(())
     }
 
@@ -562,6 +814,12 @@ impl NagameDaemon {
 
         seen.outputs = current_outputs;
 
+        // The old snapshot cannot be replayed across a changed output topology.
+        // Cancel its lease and let the durable profile matcher establish the new state.
+        if self.previews.is_pending() {
+            self.cancel_pending_preview("outputs_changed");
+        }
+
         if new_count == 0 {
             return false;
         }
@@ -603,7 +861,14 @@ impl NagameDaemon {
     /// Reload configuration from file
     async fn reload_config(&mut self) -> Result<()> {
         info!("Reloading configuration");
-        self.config = Config::load(&self.config_path).await?;
+        let (source, revision) = persistence::read_with_revision(&self.config_path).await?;
+        self.config = Config::from_toml(&source).with_context(|| {
+            format!(
+                "Failed to parse config file: {}",
+                self.config_path.display()
+            )
+        })?;
+        self.config_revision = revision;
         info!("Reloaded {} profiles", self.config.profiles.len());
 
         // Rematch existing outputs without refreshing physical display state.

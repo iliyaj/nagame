@@ -16,13 +16,31 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
+const MAX_REQUEST_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, PartialEq)]
+enum RequestLine {
+    Empty,
+    Complete(String),
+    TooLarge,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum ClientRequest {
     Outputs,
-    Preview { output: String, mode_id: String },
-    Revert { transaction_id: String },
+    Preview {
+        output: String,
+        mode_id: String,
+        profile: String,
+        revision: String,
+    },
+    Confirm {
+        transaction_id: String,
+    },
+    Revert {
+        transaction_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -30,6 +48,9 @@ pub enum ClientRequest {
 pub enum ServerEvent {
     Outputs {
         outputs: Vec<DisplayOutput>,
+        active_profile: Option<String>,
+        revision: String,
+        supported: bool,
     },
     PreviewStarted {
         transaction_id: String,
@@ -38,6 +59,14 @@ pub enum ServerEvent {
     PreviewReverted {
         transaction_id: String,
         reason: String,
+    },
+    PreviewConfirmed {
+        transaction_id: String,
+        revision: String,
+    },
+    ConfirmCompleted {
+        transaction_id: String,
+        revision: String,
     },
     RevertCompleted {
         transaction_id: String,
@@ -220,10 +249,21 @@ async fn serve_client(stream: UnixStream, incoming: mpsc::UnboundedSender<Incomi
     let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
-    let mut line = String::new();
-    if reader.read_line(&mut line).await? == 0 {
-        return Ok(());
-    }
+    let line = match read_request_line(&mut reader).await? {
+        RequestLine::Empty => return Ok(()),
+        RequestLine::Complete(line) => line,
+        RequestLine::TooLarge => {
+            write_event(
+                &mut write_half,
+                &ServerEvent::error(
+                    "request_too_large",
+                    format!("Display IPC requests are limited to {MAX_REQUEST_BYTES} bytes"),
+                ),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
 
     let request = match serde_json::from_str::<ClientRequest>(&line) {
         Ok(request) => request,
@@ -261,6 +301,24 @@ async fn serve_client(stream: UnixStream, incoming: mpsc::UnboundedSender<Incomi
         }
     }
     Ok(())
+}
+
+async fn read_request_line<R>(reader: &mut R) -> Result<RequestLine>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut line = String::new();
+    let bytes_read = reader
+        .take((MAX_REQUEST_BYTES + 1) as u64)
+        .read_line(&mut line)
+        .await?;
+    if bytes_read == 0 {
+        Ok(RequestLine::Empty)
+    } else if line.len() > MAX_REQUEST_BYTES {
+        Ok(RequestLine::TooLarge)
+    } else {
+        Ok(RequestLine::Complete(line))
+    }
 }
 
 async fn write_event(
@@ -302,5 +360,22 @@ mod tests {
         };
 
         assert_eq!(mode_id(&mode), "1920x1080@59940mHz");
+    }
+
+    #[tokio::test]
+    async fn request_lines_are_capped_before_unbounded_allocation() {
+        let oversized = vec![b'x'; MAX_REQUEST_BYTES + 1];
+        let mut reader = BufReader::new(oversized.as_slice());
+
+        assert_eq!(
+            read_request_line(&mut reader).await.unwrap(),
+            RequestLine::TooLarge
+        );
+
+        let mut reader = BufReader::new(b"{\"command\":\"outputs\"}\n".as_slice());
+        assert!(matches!(
+            read_request_line(&mut reader).await.unwrap(),
+            RequestLine::Complete(_)
+        ));
     }
 }
