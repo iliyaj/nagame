@@ -4,7 +4,7 @@
 # Maintainer: iliyaj <iliya.jokic@gmail.com>
 
 pkgname=nagame
-pkgver=0.0.2
+pkgver=0.0.3
 pkgrel=1
 pkgdesc="Dynamic Wayland display and wallpaper manager"
 arch=('x86_64')
@@ -16,7 +16,7 @@ optdepends=('awww: wallpaper management support')
 options=('!debug' '!lto')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 # SHA-256 checksum of the tagged GitHub source archive.
-sha256sums=('24654547ba5fa021d553225d41fc7c37fad28304d1fec25d91aed6584989b010')
+sha256sums=('8004877ad6460e3a475d87b283be7256b66518b4fd82f894d8d0b90ac00f1465')
 
 prepare() {
   cd "$pkgname-$pkgver"

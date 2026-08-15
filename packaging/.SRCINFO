@@ -1,6 +1,6 @@
 pkgbase = nagame
 	pkgdesc = Dynamic Wayland display and wallpaper manager
-	pkgver = 0.0.2
+	pkgver = 0.0.3
 	pkgrel = 1
 	url = https://github.com/iliyaj/nagame
 	arch = x86_64
@@ -11,7 +11,7 @@ pkgbase = nagame
 	optdepends = awww: wallpaper management support
 	options = !debug
 	options = !lto
-	source = nagame-0.0.2.tar.gz::https://github.com/iliyaj/nagame/archive/refs/tags/v0.0.2.tar.gz
-	sha256sums = 24654547ba5fa021d553225d41fc7c37fad28304d1fec25d91aed6584989b010
+	source = nagame-0.0.3.tar.gz::https://github.com/iliyaj/nagame/archive/refs/tags/v0.0.3.tar.gz
+	sha256sums = 8004877ad6460e3a475d87b283be7256b66518b4fd82f894d8d0b90ac00f1465
 
 pkgname = nagame

@@ -22,12 +22,10 @@ The package installs:
 | `/usr/share/doc/nagame/README.md` | documentation |
 | `/usr/share/licenses/nagame/LICENSE` | license text |
 
-After installing, create a config and enable the service:
+After installing, initialize a config from the live outputs and enable the service:
 
 ```bash
-mkdir -p ~/.config/nagame
-cp /usr/share/nagame/config.toml.example ~/.config/nagame/config.toml
-$EDITOR ~/.config/nagame/config.toml
+nagame init
 nagame --test-only
 systemctl --user enable --now nagame.service
 ```
